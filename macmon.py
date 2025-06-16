@@ -5,22 +5,23 @@ import requests
 import argparse
 import platform
 import socket
-# from gntp.notifier import GrowlNotifier  
 from configset import configset
 from pathlib import Path
 import sys
 from ctraceback import CTraceback
 sys.excepthook = CTraceback()
-# from gntplib import Publisher
 import sendgrowl
 from rich.console import Console
-console = Console()
+from rich.panel import Panel
+from rich.text import Text
+from rich.table import Table
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.live import Live
+from rich import box
+import threading
+from datetime import datetime
 
-# WHITELIST_MAC = {
-#     "00:11:22:33:44:55",
-#     "aa:bb:cc:dd:ee:ff",
-#     "b8:27:eb:12:34:56"
-# }
+console = Console()
 
 class _ConfigMeta(type):
     def __getattr__(cls, section):
@@ -44,7 +45,7 @@ class CONFIG(metaclass=_ConfigMeta):
                 if option in CONFIG.CONFIGOBJ.options(self._section):
                     CONFIG.CONFIGOBJ.write_config(self._section, option, value)
                 else:
-                    console.print("[white on blue]You must use 'write_config' to add new options.[/]")
+                    console.print("🚨 [bold red]You must use 'write_config' to add new options.[/]")
 
     @staticmethod
     def get(section, option, default=None):
@@ -57,25 +58,34 @@ class CONFIG(metaclass=_ConfigMeta):
         CONFIG.CONFIGOBJ.write_config(section, option, value)
 
     @staticmethod
-    def read(section = None, option = None):
+    def read(section=None, option=None):
         """Print all configuration from the config file."""
         if section:
             if option:
                 value = CONFIG.CONFIGOBJ.get_config(section, option)
-                print(f"[{section}]")
-                print(f"  {option} = {value}")
+                table = Table(title=f"📋 Configuration: [{section}]", box=box.ROUNDED)
+                table.add_column("Option", style="cyan")
+                table.add_column("Value", style="green")
+                table.add_row(option, str(value))
+                console.print(table)
             else:
-                print(f"[{section}]")
+                table = Table(title=f"📋 Configuration: [{section}]", box=box.ROUNDED)
+                table.add_column("Option", style="cyan")
+                table.add_column("Value", style="green")
                 for opt in CONFIG.CONFIGOBJ.options(section):
                     value = CONFIG.CONFIGOBJ.get_config(section, opt)
-                    print(f"  {opt} = {value}")
+                    table.add_row(opt, str(value))
+                console.print(table)
         else:
             for section in CONFIG.CONFIGOBJ.sections():
-                print(f"[{section}]")
+                table = Table(title=f"📋 Configuration: [{section}]", box=box.ROUNDED)
+                table.add_column("Option", style="cyan")
+                table.add_column("Value", style="green")
                 for option in CONFIG.CONFIGOBJ.options(section):
                     value = CONFIG.CONFIGOBJ.get_config(section, option)
-                    print(f"  {option} = {value}")
-                print()
+                    table.add_row(option, str(value))
+                console.print(table)
+                console.print()
                 
     @staticmethod
     def get_config(section, option):
@@ -88,286 +98,378 @@ class CONFIG(metaclass=_ConfigMeta):
     @staticmethod
     def get_config_as_list(section, option):
         value = CONFIG.CONFIGOBJ.get_config_as_list(section, option)
-        if value:
-            return value
-        return []
-    
-WHITELIST_MAC = set(CONFIG.get_config_as_list('macmon', 'whitelist'))
-BLACKLIST_MAC = set(CONFIG.get_config_as_list('macmon', 'blacklist'))
+        return value if value else []
 
-CHECK_INTERVAL = CONFIG.get_config('interval', 'seconds') or 30  # second
-NTFY_TOPIC = CONFIG.get_config('ntfy', 'topic') or "macmon"
-NTFY_URL = CONFIG.get_config_as_list('ntfy', 'url') or [f"https://ntfy.sh/{NTFY_TOPIC}"]
+# Load configuration with better error handling
+try:
+    WHITELIST_MAC = set(CONFIG.get_config_as_list('macmon', 'whitelist'))
+    BLACKLIST_MAC = set(CONFIG.get_config_as_list('macmon', 'blacklist'))
+    CHECK_INTERVAL = int(CONFIG.get_config('interval', 'seconds') or 30)
+    NTFY_TOPIC = CONFIG.get_config('ntfy', 'topic') or "macmon"
+    NTFY_URL = CONFIG.get_config_as_list('ntfy', 'url') or [f"https://ntfy.sh/{NTFY_TOPIC}"]
+except Exception as e:
+    console.print(f"⚠️ [bold yellow]Warning: Error loading config: {e}[/]")
+    WHITELIST_MAC = set()
+    BLACKLIST_MAC = set()
+    CHECK_INTERVAL = 30
+    NTFY_TOPIC = "macmon"
+    NTFY_URL = ["https://ntfy.sh/macmon"]
 
-# growl = GrowlNotifier(
-#     applicationName=CONFIG.get_config('growl', 'name') or "MAC Monitor",
-#     notifications=[i.strip() for i in CONFIG.get_config('growl', 'event').split(",")] if CONFIG.get_config('growl', 'event') else ["Unknown Device"],
-#     defaultNotifications=CONFIG.get_config('growl', 'default') or "Unknown Device"
-# )
-
-# growl = Publisher(
-#     CONFIG.get_config('growl', 'name') or "MAC Monitor",
-#     [i.strip() for i in CONFIG.get_config('growl', 'event').split(",")] if CONFIG.get_config('growl', 'event') else ["Unknown Device"]
-# )
-
-# try:
-#     growl.register()
-# except Exception as e:
-#     print(f"[!] Growl registration error: {e}")
-#     CTraceback(*sys.exc_info())
-
+# Global variables for monitoring state
+monitoring_active = False
+scan_count = 0
+start_time = None
 
 def get_mac_addresses():
-    """Take the Mac Address from the 'ARP -A' output."""
+    """Extract MAC addresses from ARP table."""
     try:
-        output = subprocess.check_output("arp -a", shell=True, text=True)
-    except subprocess.CalledProcessError:
+        system = platform.system().lower()
+        if system == "windows":
+            output = subprocess.check_output("arp -a", shell=True, text=True)
+        else:
+            output = subprocess.check_output("arp -a", shell=True, text=True)
+    except subprocess.CalledProcessError as e:
+        console.print(f"❌ [bold red]Error running ARP command: {e}[/]")
         return set()
 
     mac_regex = r"(([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2})"
-    # macs = set(re.findall(mac_regex, output))
-    # return {mac.lower() for mac in macs}
-    macs_list = [mac[0].lower() for mac in re.findall(mac_regex, output)]
-    macs = set(macs_list)
-    return macs
+    macs_list = [mac[0].lower().replace('-', ':') for mac in re.findall(mac_regex, output)]
+    return set(macs_list)
 
-def notify_growl(message):
-    """Send notifications using Growl."""
-    # print("[START] Send notifications using Growl.")
+def normalize_mac(mac):
+    """Normalize MAC address format."""
+    return mac.lower().replace('-', ':')
+
+def get_device_info(ip):
+    """Get device hostname if possible."""
     try:
-        # growl.notify(
-        #     noteType="Unknown Device",
-        #     title="Unknown device",
-        #     description=message,
-        #     sticky=True,
-        #     priority=1,
-        # )
-        # growl.publish(
-        #     CONFIG.get_config('growl', 'default') or "Unknown Device",
-        #     CONFIG.get_config('growl', 'name') or "MAC Monitor",
-        #     message,
-        #     sticky=True,
-        #     priority=1,
-        # )
+        return socket.gethostbyaddr(ip)[0]
+    except Exception:
+        return "Unknown Device"
+
+def notify_growl(message, title="MAC Monitor"):
+    """Send notifications using Growl."""
+    try:
         sendgrowl.Growl().Publish(
             CONFIG.get_config('growl', 'name') or "MAC Monitor",
             CONFIG.get_config('growl', 'default') or "Unknown Device",
-            CONFIG.get_config('growl', 'name') or "MAC Monitor",
+            title,
             message,
             sticky=True,
             priority=1,
         )
-        # print("[END] Send notifications using Growl.")
     except Exception as e:
-        print(f"[!] Growl error: {e}")
-        CTraceback(*sys.exc_info())
+        console.print(f"🚨 [bold red]Growl error: {e}[/]")
 
-def notify_ntfy(message):
+def notify_ntfy(message, title="MAC Monitor"):
     """Send notifications using ntfy.sh."""
-    # print("[START] Send notifications using ntfy.sh.")
     for url in NTFY_URL:
         if not url.startswith("https://ntfy.sh/"):
-            print(f"[!] Invalid ntfy URL: {url}")
+            console.print(f"⚠️ [bold yellow]Invalid ntfy URL: {url}[/]")
             continue
-        # URL = url.rstrip('/') + '/' + NTFY_TOPIC.lstrip('/')
-        # print(f"URL: {url}")
         try:
-            requests.post(url, data=message.encode("utf-8"))
+            headers = {'Title': title}
+            requests.post(url, data=message.encode("utf-8"), headers=headers, timeout=5)
         except Exception as e:
-            print(rf"[white on red]\[!][/] [black on #FFFFF00]Ntfy error:[/] [white on blue]{e}[/]")
-    # print("[END] Send notifications using ntfy.sh.")
+            console.print(f"🚨 [bold red]Ntfy error for {url}: {e}[/]")
+
+def create_status_table(current_macs, seen_macs, whitelist, blacklist):
+    """Create a status table for monitoring."""
+    table = Table(title="🖥️ Network Monitor Status", box=box.ROUNDED)
+    table.add_column("Category", style="cyan", width=15)
+    table.add_column("Count", style="green", width=8)
+    table.add_column("Details", style="white")
     
+    table.add_row("🌐 Current MACs", str(len(current_macs)), ", ".join(sorted(current_macs)[:5]) + ("..." if len(current_macs) > 5 else ""))
+    table.add_row("👁️ Seen Unknown", str(len(seen_macs)), ", ".join(sorted(seen_macs)[:3]) + ("..." if len(seen_macs) > 3 else ""))
+    table.add_row("✅ Whitelist", str(len(whitelist)), ", ".join(sorted(whitelist)[:3]) + ("..." if len(whitelist) > 3 else ""))
+    table.add_row("❌ Blacklist", str(len(blacklist)), ", ".join(sorted(blacklist)[:3]) + ("..." if len(blacklist) > 3 else ""))
+    
+    return table
+
+def update_mac_list(section, mac_list, mac_to_remove):
+    """Safely update MAC address lists."""
+    try:
+        updated_list = [mac for mac in mac_list if mac != mac_to_remove]
+        if updated_list != mac_list:
+            CONFIG.write_config('macmon', section, " ".join(updated_list))
+            return True
+    except Exception as e:
+        console.print(f"❌ [bold red]Error updating {section}: {e}[/]")
+    return False
+
 def monitor_network():
+    """Enhanced network monitoring with better visualization."""
+    global monitoring_active, scan_count, start_time
+    
+    monitoring_active = True
+    scan_count = 0
+    start_time = datetime.now()
     seen = set()
-    # if not WHITELIST_MAC:
-    #     print("[!] No MAC addresses in whitelist. All unknown devices will be reported.")
-    #     return
-    # else:
-    message = "[*] Starting Network Monitoring (Ctrl+C for Exit)..."
-    print(f"{message}\n")
-    notify_growl(message)
-    notify_ntfy(message)
-    print(f"[*] Whitelist MAC addresses: {', '.join(WHITELIST_MAC)}")
-    while True:
-        macs = get_mac_addresses()
-        for mac in macs:
-            if mac not in set(CONFIG.get_config_as_list('macmon', 'whitelist')) and mac not in set(CONFIG.get_config_as_list('macmon', 'detected')) and mac not in seen:
-                message = f"Mac Address Unknown Detected: {mac}"
-                print(f"[!] {message}")
-                notify_growl(message)
-                notify_ntfy(message)
-                seen.add(mac)
-            elif mac in set(CONFIG.get_config_as_list('macmon', 'blacklist')):
-                message = f"Mac Address in Blacklist Detected: {mac}"
-                print(f"[!] {message}")
-                notify_growl(message)
-                notify_ntfy(message)
-                # seen.add(mac)
-        # Cek apakah ada MAC yang sudah tidak terlihat lagi
-        for mac in seen.copy():
-            if mac not in macs:
-                seen.remove(mac)
-                message = f"Mac Address {mac} is no longer detected."
-                print(f"[+] {message}")
-                notify_growl(message)
-                notify_ntfy(message)
-        # Cek apakah ada MAC yang sudah tidak terlihat lagi di whitelist
-        for mac in set(WHITELIST_MAC).copy():
-            if mac not in macs:
-                message = f"Mac Address {mac} is no longer in the network."
-                print(f"[+] {message}")
-                notify_growl(message)
-                notify_ntfy(message)
-                # Jika ada MAC yang sudah tidak terlihat lagi di whitelist, hapus dari whitelist
-                next_whitelist = CONFIG.get_config_as_list('macmon', 'whitelist').copy().remove(mac)
-                CONFIG.CONFIGOBJ.write_config('macmon', 'whitelist', next_whitelist)
-                message = f"Removed {mac} from whitelist."
-                print(f"[-] {message}")
-                notify_growl(message)
-                notify_ntfy(message)
-        # Cek apakah ada MAC yang sudah tidak terlihat lagi di blacklist
-        for mac in set(BLACKLIST_MAC).copy():
-            if mac not in macs:
-                message = f"Mac Address {mac} is no longer in the network."
-                print(f"[+] {message}")
-                notify_growl(message)
-                notify_ntfy(message)
-                # Jika ada MAC yang sudah tidak terlihat lagi di blacklist, hapus dari blacklist
-                next_blacklist = CONFIG.get_config_as_list('macmon', 'blacklist').copy().remove(mac)
-                CONFIG.CONFIGOBJ.write_config('macmon', 'blacklist', next_blacklist)
-                message = f"Removed {mac} from blacklist."
-                print(f"[-] {message}")
-                notify_growl(message)
-                notify_ntfy(message)
-        # Cek apakah ada MAC yang sudah tidak terlihat lagi di detected
-        for mac in set(CONFIG.get_config_as_list('macmon', 'detected')).copy():
-            if mac not in macs:
-                message = f"Mac Address {mac} is no longer in the network."
-                print(f"[+] {message}")
-                notify_growl(message)
-                notify_ntfy(message)
-                # Jika ada MAC yang sudah tidak terlihat lagi di detected, hapus dari detected
-                try:
-                    next_detected = CONFIG.get_config_as_list('macmon', 'detected').copy().remove(mac)
-                    CONFIG.CONFIGOBJ.write_config('macmon', 'detected', next_detected)
-                except Exception as e:
-                    print(f"[!] Error removing {mac} from detected: {e}")
-                    CTraceback(*sys.exc_info())
-                message = f"Removed {mac} from detected."
-                print(f"[-] {message}")
-                notify_growl(message)
-                notify_ntfy(message)
+    
+    # Display startup message
+    console.print(Panel.fit(
+        "[bold green]🚀 MAC Monitor Started[/]\n"
+        f"⏱️  Scan interval: {CHECK_INTERVAL} seconds\n"
+        f"📊 Whitelist: {len(WHITELIST_MAC)} devices\n"
+        f"🚫 Blacklist: {len(BLACKLIST_MAC)} devices",
+        title="Network Monitor",
+        border_style="green"
+    ))
+    
+    # Send startup notification
+    startup_msg = f"🚀 MAC Monitor started - Interval: {CHECK_INTERVAL}s"
+    notify_growl(startup_msg)
+    notify_ntfy(startup_msg)
+    
+    try:
+        while monitoring_active:
+            scan_count += 1
+            current_time = datetime.now()
+            
+            console.print(f"\n🔍 [bold cyan]Scan #{scan_count} - {current_time.strftime('%H:%M:%S')}[/]")
+            
+            # Get current MAC addresses
+            current_macs = get_mac_addresses()
+            current_whitelist = set(CONFIG.get_config_as_list('macmon', 'whitelist'))
+            current_blacklist = set(CONFIG.get_config_as_list('macmon', 'blacklist'))
+            current_detected = set(CONFIG.get_config_as_list('macmon', 'detected'))
+            
+            # Check for new unknown devices
+            for mac in current_macs:
+                if (mac not in current_whitelist and 
+                    mac not in current_detected and 
+                    mac not in seen):
+                    
+                    message = f"🆕 Unknown device detected: {mac}"
+                    console.print(f"[bold yellow]{message}[/]")
+                    notify_growl(message, "Unknown Device")
+                    notify_ntfy(message, "Unknown Device")
+                    seen.add(mac)
+                    
+                    # Add to detected list
+                    updated_detected = list(current_detected) + [mac]
+                    CONFIG.write_config('macmon', 'detected', " ".join(updated_detected))
+            
+            # Check for blacklisted devices
+            for mac in current_macs:
+                if mac in current_blacklist:
+                    message = f"🚫 Blacklisted device active: {mac}"
+                    console.print(f"[bold red]{message}[/]")
+                    notify_growl(message, "Blacklisted Device")
+                    notify_ntfy(message, "Blacklisted Device")
+            
+            # Check for devices that left the network
+            all_tracked = current_whitelist | current_blacklist | current_detected | seen
+            for mac in all_tracked.copy():
+                if mac not in current_macs:
+                    # Device left network
+                    if mac in seen:
+                        seen.remove(mac)
+                        message = f"👋 Unknown device left: {mac}"
+                        console.print(f"[bold blue]{message}[/]")
+                        notify_growl(message, "Device Left")
+                        notify_ntfy(message, "Device Left")
+                    
+                    # Remove from detected list
+                    if mac in current_detected:
+                        if update_mac_list('detected', list(current_detected), mac):
+                            message = f"🗑️ Removed {mac} from detected list"
+                            console.print(f"[dim]{message}[/]")
+            
+            # Display status table
+            status_table = create_status_table(current_macs, seen, current_whitelist, current_blacklist)
+            console.print(status_table)
+            
+            # Countdown with progress bar
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+                transient=True
+            ) as progress:
+                task = progress.add_task(f"⏳ Next scan in {CHECK_INTERVAL}s", total=CHECK_INTERVAL)
+                for i in range(CHECK_INTERVAL):
+                    if not monitoring_active:
+                        break
+                    progress.update(task, advance=1, description=f"⏳ Next scan in {CHECK_INTERVAL - i - 1}s")
+                    time.sleep(1)
+                    
+    except KeyboardInterrupt:
+        monitoring_active = False
+        console.print("\n🛑 [bold red]Monitoring stopped by user[/]")
+    finally:
+        runtime = datetime.now() - start_time if start_time else None
+        console.print(Panel.fit(
+            f"[bold green]📊 Monitoring Summary[/]\n"
+            f"⏱️  Runtime: {runtime}\n"
+            f"🔍 Total scans: {scan_count}\n"
+            f"👁️  Unknown devices seen: {len(seen)}",
+            title="Session Complete",
+            border_style="blue"
+        ))
         
-        # Down counter sebelum sleep
-        interval = int(CONFIG.get_config('interval', 'seconds') or CHECK_INTERVAL or 30)
-        for i in range(interval, 0, -1):
-            print(f"[*] Next scan in {interval} seconds: {i} ", end="\r", flush=True)
-            time.sleep(1)
-        print(" " * 50, end="\r")  # Bersihkan baris setelah selesai
+        # Send shutdown notification
+        shutdown_msg = f"🛑 MAC Monitor stopped - Runtime: {runtime}, Scans: {scan_count}"
+        notify_growl(shutdown_msg)
+        notify_ntfy(shutdown_msg)
 
 def find_mac_or_ip(query):
-    """
-    Look for a Mac Address or IP Address on the network and display the details.
-    """
+    """Enhanced MAC/IP lookup with better formatting."""
+    console.print(f"🔍 [bold cyan]Searching for: {query}[/]")
+    
     system = platform.system().lower()
-    if system == "windows":
-        arp_cmd = "arp -a"
-    else:
-        arp_cmd = "arp -a"
+    arp_cmd = "arp -a"
 
     try:
         output = subprocess.check_output(arp_cmd, shell=True, text=True)
     except Exception as e:
-        message = f"Failed to run '{arp_cmd}': {e}"
-        print(f"[-] {message}")
-        notify_growl(message)
-        notify_ntfy(message)
+        console.print(f"❌ [bold red]Failed to run ARP command: {e}[/]")
         return
 
     mac_regex = r"(([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})"
     ip_regex = r"(\d{1,3}(?:\.\d{1,3}){3})"
 
-    # Normalisasi query (lowercase, ganti - ke :)
-    norm_query = query.lower().replace('-', ':')
+    norm_query = normalize_mac(query)
     found = False
+    results = []
+
     for line in output.splitlines():
         macs = re.findall(mac_regex, line)
         ips = re.findall(ip_regex, line)
-        # Cek semua MAC di baris ini
+        
+        # Check MACs
         for mac_tuple in macs:
-            mac = mac_tuple[0].lower().replace('-', ':')
+            mac = normalize_mac(mac_tuple[0])
             if norm_query == mac:
                 found = True
-                ip = ips[0] if ips else "(unknown)"
-                device_name = ""
-                try:
-                    if ip != "(unknown)":
-                        device_name = socket.gethostbyaddr(ip)[0]
-                    else:
-                        device_name = "(unknown)"
-                except Exception:
-                    device_name = "(unknown)"
-                print(f"Details found:")
-                print(f"  IP Address : {ip}")
-                print(f"  MAC Address: {mac}")
-                print(f"  Device Name: {device_name}")
-                print(f"  ARP line   : {line.strip()}")
-                print("-" * 40)
-        # Cek semua IP di baris ini
+                ip = ips[0] if ips else "Unknown"
+                device_name = get_device_info(ip) if ip != "Unknown" else "Unknown"
+                results.append({
+                    'type': 'MAC',
+                    'ip': ip,
+                    'mac': mac,
+                    'device': device_name,
+                    'line': line.strip()
+                })
+        
+        # Check IPs
         for ip in ips:
             if query == ip:
                 found = True
-                mac = macs[0][0].lower().replace('-', ':') if macs else "(unknown)"
-                device_name = ""
-                try:
-                    device_name = socket.gethostbyaddr(ip)[0]
-                except Exception:
-                    device_name = "(unknown)"
-                print(f"Details found:")
-                print(f"  IP Address : {ip}")
-                print(f"  MAC Address: {mac}")
-                print(f"  Device Name: {device_name}")
-                print(f"  ARP line   : {line.strip()}")
-                print("-" * 40)
-    if not found:
-        print(f"[!] Not found: {query}")
+                mac = normalize_mac(macs[0][0]) if macs else "Unknown"
+                device_name = get_device_info(ip)
+                results.append({
+                    'type': 'IP',
+                    'ip': ip,
+                    'mac': mac,
+                    'device': device_name,
+                    'line': line.strip()
+                })
+
+    if found:
+        for result in results:
+            table = Table(title=f"🎯 Found {result['type']} Match", box=box.ROUNDED)
+            table.add_column("Property", style="cyan")
+            table.add_column("Value", style="green")
+            
+            table.add_row("🌐 IP Address", result['ip'])
+            table.add_row("🔗 MAC Address", result['mac'])
+            table.add_row("📱 Device Name", result['device'])
+            table.add_row("📋 ARP Entry", result['line'])
+            
+            # Check if in lists
+            if result['mac'] in WHITELIST_MAC:
+                table.add_row("✅ Status", "[green]Whitelisted[/]")
+            elif result['mac'] in BLACKLIST_MAC:
+                table.add_row("❌ Status", "[red]Blacklisted[/]")
+            else:
+                table.add_row("❓ Status", "[yellow]Unknown[/]")
+            
+            console.print(table)
+    else:
+        console.print(f"❌ [bold red]Not found: {query}[/]")
+
+def detect_current_devices():
+    """Detect and display current devices with enhanced formatting."""
+    console.print("🔍 [bold cyan]Detecting current devices...[/]")
+    
+    macs = get_mac_addresses()
+    if not macs:
+        console.print("❌ [bold red]No MAC addresses detected[/]")
+        return
+    
+    table = Table(title="🖥️ Current Network Devices", box=box.ROUNDED)
+    table.add_column("#", style="dim", width=4)
+    table.add_column("MAC Address", style="cyan")
+    table.add_column("Status", style="white")
+    
+    for i, mac in enumerate(sorted(macs), 1):
+        if mac in WHITELIST_MAC:
+            status = "[green]✅ Whitelisted[/]"
+        elif mac in BLACKLIST_MAC:
+            status = "[red]❌ Blacklisted[/]"
+        else:
+            status = "[yellow]❓ Unknown[/]"
+        
+        table.add_row(str(i), mac, status)
+    
+    console.print(table)
+    
+    # Update detected list
+    CONFIG.write_config('macmon', 'detected', " ".join(macs))
+    console.print(f"✅ [bold green]Updated detected list with {len(macs)} devices[/]")
+
+def add_to_list(mac, list_type):
+    """Add MAC to whitelist or blacklist with validation."""
+    mac = normalize_mac(mac)
+    
+    # Validate MAC format
+    mac_pattern = r'^([0-9a-f]{2}:){5}[0-9a-f]{2}$'
+    if not re.match(mac_pattern, mac):
+        console.print(f"❌ [bold red]Invalid MAC address format: {mac}[/]")
+        return
+    
+    current_list = set(CONFIG.get_config_as_list('macmon', list_type))
+    
+    if mac in current_list:
+        console.print(f"⚠️ [bold yellow]{mac} is already in {list_type}[/]")
+        return
+    
+    updated_list = list(current_list) + [mac]
+    CONFIG.write_config('macmon', list_type, " ".join(updated_list))
+    
+    icon = "✅" if list_type == "whitelist" else "❌"
+    console.print(f"{icon} [bold green]Added {mac} to {list_type}[/]")
+    
+    message = f"{icon} Added {mac} to {list_type}"
+    notify_growl(message)
+    notify_ntfy(message)
 
 def version():
+    """Display version information with styling."""
     version_file = Path(__file__).parent / '__version__.py'
     if version_file.exists():
         import importlib.util
         spec = importlib.util.spec_from_file_location("__version__", str(version_file))
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        print(f"MAC Monitor Version: {mod.version}")
+        
+        console.print(Panel.fit(
+            f"[bold green]MAC Monitor[/]\n"
+            f"Version: {mod.version}\n"
+            f"Platform: {platform.system()} {platform.release()}",
+            title="🔢 Version Info",
+            border_style="blue"
+        ))
     else:
-        print("No version info found.")
+        console.print("❌ [bold red]Version information not found[/]")
 
-def usage():
-    parser = argparse.ArgumentParser(
-        description="MAC Monitor Utility",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
-    parser.add_argument('-f', '--find', metavar='MAC_OR_IP', help='Find Mac Address or IP Address on the Network')
-    parser.add_argument('-g', '--generate', action='store_true', help='Generate a new configuration file with default values')
-    parser.add_argument('-d', '--detect', action='store_true', help='Detect current MAC addresses on the network')
-    parser.add_argument('-s', '--set', action='store_true', help='Set detected as whitelist')
-    parser.add_argument('-r', '--read', action='store_true', help='Read and print the configuration file')
-    parser.add_argument('-v', '--version', action='store_true', help='Show version information')
-    parser.add_argument('-a', '--add', action='store', help = 'Add mac to whitelist')
-    parser.add_argument('-b', '--blacklist', action = 'store', help = 'Add mac to blacklist')
+def generate_config():
+    """Generate configuration file with better feedback."""
+    console.print("⚙️ [bold cyan]Generating configuration file...[/]")
     
-    args = parser.parse_args()
-
-    if args.find:
-        find_mac_or_ip(args.find)
-    elif args.version:
-        version()
-    elif args.read:
-        print("[*] Reading configuration file...")
-        CONFIG.read()
-    elif args.generate:
-        print("[*] Generating new configuration file with default values...")
+    try:
         CONFIG.write_config('macmon', 'whitelist', "")
         CONFIG.write_config('macmon', 'blacklist', "")
         CONFIG.write_config('macmon', 'detected', " ".join(list(get_mac_addresses())))
@@ -377,52 +479,78 @@ def usage():
         CONFIG.write_config('growl', 'name', "MAC Monitor")
         CONFIG.write_config('growl', 'event', "Unknown Device")
         CONFIG.write_config('growl', 'default', "Unknown Device")
-        print("[+] Configuration file generated successfully.")
+        
+        console.print("✅ [bold green]Configuration file generated successfully[/]")
+        console.print(f"📁 [dim]Location: {CONFIG.CONFIGFILE}[/]")
+    except Exception as e:
+        console.print(f"❌ [bold red]Error generating config: {e}[/]")
+
+def usage():
+    """Enhanced argument parsing with better help."""
+    parser = argparse.ArgumentParser(
+        description="🖥️ MAC Monitor - Network Device Monitoring Utility",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s                          # Start monitoring
+  %(prog)s -f aa:bb:cc:dd:ee:ff     # Find specific MAC
+  %(prog)s -f 192.168.1.100         # Find specific IP
+  %(prog)s -d                       # Detect current devices
+  %(prog)s -a aa:bb:cc:dd:ee:ff     # Add to whitelist
+  %(prog)s -b aa:bb:cc:dd:ee:ff     # Add to blacklist
+        """
+    )
+    
+    parser.add_argument('-f', '--find', metavar='MAC_OR_IP', 
+                       help='🔍 Find MAC or IP address in network')
+    parser.add_argument('-g', '--generate', action='store_true', 
+                       help='⚙️ Generate configuration file with defaults')
+    parser.add_argument('-d', '--detect', action='store_true', 
+                       help='🔍 Detect current MAC addresses on network')
+    parser.add_argument('-s', '--set', action='store_true', 
+                       help='✅ Set detected devices as whitelist')
+    parser.add_argument('-r', '--read', action='store_true', 
+                       help='📋 Read and display configuration')
+    parser.add_argument('-v', '--version', action='store_true', 
+                       help='🔢 Show version information')
+    parser.add_argument('-a', '--add', metavar='MAC', 
+                       help='✅ Add MAC address to whitelist')
+    parser.add_argument('-b', '--blacklist', metavar='MAC', 
+                       help='❌ Add MAC address to blacklist')
+    
+    args = parser.parse_args()
+
+    if args.find:
+        find_mac_or_ip(args.find)
+    elif args.version:
+        version()
+    elif args.read:
+        console.print("📋 [bold cyan]Reading configuration...[/]")
+        CONFIG.read()
+    elif args.generate:
+        generate_config()
     elif args.detect:
-        print("[*] Detecting current MAC addresses on the network...")
-        macs = get_mac_addresses()
-        if macs:
-            print(f"Detected MAC addresses: {', '.join(macs)}")
-            CONFIG.write_config('macmon', 'detected', " ".join(macs))
-        else:
-            message = "No MAC addresses detected."
-            print(f"[!] {message}")
-            notify_growl(message)
-            notify_ntfy(message)
+        detect_current_devices()
     elif args.set:
-        print("[*] Setting detected MAC addresses as whitelist...")
+        console.print("✅ [bold cyan]Setting detected devices as whitelist...[/]")
         detected_macs = CONFIG.get_config_as_list('macmon', 'detected')
         if detected_macs:
             CONFIG.write_config('macmon', 'whitelist', " ".join(detected_macs))
-            print(f"[+] Whitelist updated with detected MAC addresses: {', '.join(detected_macs)}")
+            console.print(f"✅ [bold green]Whitelist updated with {len(detected_macs)} devices[/]")
         else:
-            print("[!] No detected MAC addresses found to set as whitelist.")
+            console.print("❌ [bold red]No detected devices found[/]")
     elif args.add:
-        if args.add:
-            mac_to_add = args.add.lower().replace(':', '-')
-            if mac_to_add not in WHITELIST_MAC:
-                CONFIG.write_config('macmon', 'whitelist', " ".join(list(WHITELIST_MAC) + [mac_to_add]))
-                print(f"[+] Added {mac_to_add} to whitelist.")
-                notify_growl(f"Added {mac_to_add} to whitelist.")
-                notify_ntfy(f"Added {mac_to_add} to whitelist.")
-            else:
-                print(f"[!] {mac_to_add} is already in the whitelist.")
-        else:
-            print("[!] No MAC address provided to add to whitelist.")
+        add_to_list(args.add, 'whitelist')
     elif args.blacklist:
-        if args.blacklist:
-            mac_to_blacklist = args.blacklist.lower().replace(':', '-')
-            if mac_to_blacklist not in BLACKLIST_MAC:
-                CONFIG.write_config('macmon', 'blacklist', " ".join(list(BLACKLIST_MAC) + [mac_to_blacklist]))
-                print(f"[+] Added {mac_to_blacklist} to blacklist.")
-                notify_growl(f"Added {mac_to_blacklist} to blacklist.")
-                notify_ntfy(f"Added {mac_to_blacklist} to blacklist.")
-            else:
-                print(f"[!] {mac_to_blacklist} is already in the blacklist.")
-        else:
-            print("[!] No MAC address provided to add to blacklist.")
+        add_to_list(args.blacklist, 'blacklist')
     else:
-        print('use -h or --help for more options.\n')
+        console.print(Panel.fit(
+            "[bold green]🖥️ MAC Monitor[/]\n"
+            "[dim]Use -h or --help for options[/]\n"
+            "[dim]Starting network monitoring...[/]",
+            title="Welcome",
+            border_style="green"
+        ))
         monitor_network()
 
 # === MAIN ===
@@ -430,4 +558,9 @@ if __name__ == "__main__":
     try:
         usage()
     except KeyboardInterrupt:
-        print("\n[+] Monitoring is stopped.")
+        console.print("\n🛑 [bold red]Program interrupted by user[/]")
+        sys.exit(0)
+    except Exception as e:
+        console.print(f"💥 [bold red]Unexpected error: {e}[/]")
+        CTraceback(*sys.exc_info())
+        sys.exit(1)
