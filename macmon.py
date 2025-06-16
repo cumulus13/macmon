@@ -13,6 +13,9 @@ from ctraceback import CTraceback
 sys.excepthook = CTraceback()
 # from gntplib import Publisher
 import sendgrowl
+from rich.console import Console
+console = Console()
+
 # WHITELIST_MAC = {
 #     "00:11:22:33:44:55",
 #     "aa:bb:cc:dd:ee:ff",
@@ -38,33 +41,21 @@ class CONFIG(metaclass=_ConfigMeta):
             if option == "_section":
                 super().__setattr__(option, value)
             else:
-                CONFIG.CONFIGOBJ.write_config(self._section, option, value)
+                if option in CONFIG.CONFIGOBJ.options(self._section):
+                    CONFIG.CONFIGOBJ.write_config(self._section, option, value)
+                else:
+                    console.print("[white on blue]You must use 'write_config' to add new options.[/]")
 
-    @staticmethod
-    def get_config(section, option):
-        return CONFIG.CONFIGOBJ.get_config(section, option)
-    
     @staticmethod
     def get(section, option, default=None):
         """Get configuration value with a default fallback."""
         return CONFIG.CONFIGOBJ.get_config(section, option, default)
     
     @staticmethod
-    def write_config(section, option, value):
-        CONFIG.CONFIGOBJ.write_config(section, option, value)
-        
-    @staticmethod
     def write(section, option, value):
         """Write configuration value."""
         CONFIG.CONFIGOBJ.write_config(section, option, value)
 
-    @staticmethod
-    def get_config_as_list(section, option):
-        value = CONFIG.CONFIGOBJ.get_config_as_list(section, option)
-        if value:
-            return value
-        return []
-    
     @staticmethod
     def read(section = None, option = None):
         """Print all configuration from the config file."""
@@ -85,7 +76,22 @@ class CONFIG(metaclass=_ConfigMeta):
                     value = CONFIG.CONFIGOBJ.get_config(section, option)
                     print(f"  {option} = {value}")
                 print()
+                
+    @staticmethod
+    def get_config(section, option):
+        return CONFIG.CONFIGOBJ.get_config(section, option)
+        
+    @staticmethod
+    def write_config(section, option, value):
+        CONFIG.CONFIGOBJ.write_config(section, option, value)
 
+    @staticmethod
+    def get_config_as_list(section, option):
+        value = CONFIG.CONFIGOBJ.get_config_as_list(section, option)
+        if value:
+            return value
+        return []
+    
 WHITELIST_MAC = set(CONFIG.get_config_as_list('macmon', 'whitelist'))
 BLACKLIST_MAC = set(CONFIG.get_config_as_list('macmon', 'blacklist'))
 
@@ -168,20 +174,20 @@ def notify_ntfy(message):
         try:
             requests.post(url, data=message.encode("utf-8"))
         except Exception as e:
-            print(f"[!] Ntfy error: {e}")
+            print(rf"[white on red]\[!][/] [black on #FFFFF00]Ntfy error:[/] [white on blue]{e}[/]")
     # print("[END] Send notifications using ntfy.sh.")
     
 def monitor_network():
     seen = set()
-    if not WHITELIST_MAC:
-        print("[!] No MAC addresses in whitelist. All unknown devices will be reported.")
-        return
-    else:
-        message = "[*] Starting Network Monitoring (Ctrl+C for Exit)..."
-        print(f"{message}\n")
-        notify_growl(message)
-        notify_ntfy(message)
-        print(f"[*] Whitelist MAC addresses: {', '.join(WHITELIST_MAC)}")
+    # if not WHITELIST_MAC:
+    #     print("[!] No MAC addresses in whitelist. All unknown devices will be reported.")
+    #     return
+    # else:
+    message = "[*] Starting Network Monitoring (Ctrl+C for Exit)..."
+    print(f"{message}\n")
+    notify_growl(message)
+    notify_ntfy(message)
+    print(f"[*] Whitelist MAC addresses: {', '.join(WHITELIST_MAC)}")
     while True:
         macs = get_mac_addresses()
         for mac in macs:
@@ -241,8 +247,12 @@ def monitor_network():
                 notify_growl(message)
                 notify_ntfy(message)
                 # Jika ada MAC yang sudah tidak terlihat lagi di detected, hapus dari detected
-                next_detected = CONFIG.get_config_as_list('macmon', 'detected').copy().remove(mac)
-                CONFIG.CONFIGOBJ.write_config('macmon', 'detected', next_detected)
+                try:
+                    next_detected = CONFIG.get_config_as_list('macmon', 'detected').copy().remove(mac)
+                    CONFIG.CONFIGOBJ.write_config('macmon', 'detected', next_detected)
+                except Exception as e:
+                    print(f"[!] Error removing {mac} from detected: {e}")
+                    CTraceback(*sys.exc_info())
                 message = f"Removed {mac} from detected."
                 print(f"[-] {message}")
                 notify_growl(message)
@@ -344,6 +354,8 @@ def usage():
     parser.add_argument('-s', '--set', action='store_true', help='Set detected as whitelist')
     parser.add_argument('-r', '--read', action='store_true', help='Read and print the configuration file')
     parser.add_argument('-v', '--version', action='store_true', help='Show version information')
+    parser.add_argument('-a', '--add', action='store', help = 'Add mac to whitelist')
+    parser.add_argument('-b', '--blacklist', action = 'store', help = 'Add mac to blacklist')
     
     args = parser.parse_args()
 
@@ -385,6 +397,30 @@ def usage():
             print(f"[+] Whitelist updated with detected MAC addresses: {', '.join(detected_macs)}")
         else:
             print("[!] No detected MAC addresses found to set as whitelist.")
+    elif args.add:
+        if args.add:
+            mac_to_add = args.add.lower().replace(':', '-')
+            if mac_to_add not in WHITELIST_MAC:
+                CONFIG.write_config('macmon', 'whitelist', " ".join(list(WHITELIST_MAC) + [mac_to_add]))
+                print(f"[+] Added {mac_to_add} to whitelist.")
+                notify_growl(f"Added {mac_to_add} to whitelist.")
+                notify_ntfy(f"Added {mac_to_add} to whitelist.")
+            else:
+                print(f"[!] {mac_to_add} is already in the whitelist.")
+        else:
+            print("[!] No MAC address provided to add to whitelist.")
+    elif args.blacklist:
+        if args.blacklist:
+            mac_to_blacklist = args.blacklist.lower().replace(':', '-')
+            if mac_to_blacklist not in BLACKLIST_MAC:
+                CONFIG.write_config('macmon', 'blacklist', " ".join(list(BLACKLIST_MAC) + [mac_to_blacklist]))
+                print(f"[+] Added {mac_to_blacklist} to blacklist.")
+                notify_growl(f"Added {mac_to_blacklist} to blacklist.")
+                notify_ntfy(f"Added {mac_to_blacklist} to blacklist.")
+            else:
+                print(f"[!] {mac_to_blacklist} is already in the blacklist.")
+        else:
+            print("[!] No MAC address provided to add to blacklist.")
     else:
         print('use -h or --help for more options.\n')
         monitor_network()
