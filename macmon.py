@@ -17,9 +17,11 @@ from rich.text import Text
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.live import Live
+from rich.emoji import Emoji
 from rich import box
 import threading
 from datetime import datetime
+import shutil
 
 console = Console()
 
@@ -176,14 +178,15 @@ def notify_ntfy(message, title="MAC Monitor"):
 def create_status_table(current_macs, seen_macs, whitelist, blacklist):
     """Create a status table for monitoring."""
     table = Table(title="🖥️ Network Monitor Status", box=box.ROUNDED)
+    # table = Table(title=f"{Emoji.replace(':desktop_computer:')} Network Monitor Status", box=box.ROUNDED)
     table.add_column("Category", style="cyan", width=15)
     table.add_column("Count", style="green", width=8)
     table.add_column("Details", style="white")
     
-    table.add_row("🌐 Current MACs", str(len(current_macs)), ", ".join(sorted(current_macs)[:5]) + ("..." if len(current_macs) > 5 else ""))
-    table.add_row("👁️ Seen Unknown", str(len(seen_macs)), ", ".join(sorted(seen_macs)[:3]) + ("..." if len(seen_macs) > 3 else ""))
-    table.add_row("✅ Whitelist", str(len(whitelist)), ", ".join(sorted(whitelist)[:3]) + ("..." if len(whitelist) > 3 else ""))
-    table.add_row("❌ Blacklist", str(len(blacklist)), ", ".join(sorted(blacklist)[:3]) + ("..." if len(blacklist) > 3 else ""))
+    table.add_row("🌐 Current MACs", str(len(current_macs)), ", ".join(sorted(current_macs)[:55]) + ("..." if len(current_macs) > 55 else ""))
+    table.add_row(f"{Emoji.replace(':eye:')} Seen Unknown", str(len(seen_macs)), ", ".join(sorted(seen_macs)[:55]) + ("..." if len(seen_macs) > 55 else ""))
+    table.add_row("✅ Whitelist", str(len(whitelist)), ", ".join(sorted(whitelist)[:55]) + ("..." if len(whitelist) > 55 else ""))
+    table.add_row("❌ Blacklist", str(len(blacklist)), ", ".join(sorted(blacklist)[:55]) + ("..." if len(blacklist) > 55 else ""))
     
     return table
 
@@ -208,13 +211,15 @@ def monitor_network():
     seen = set()
     
     # Display startup message
-    console.print(Panel.fit(
+    console.print(Panel(
         "[bold green]🚀 MAC Monitor Started[/]\n"
-        f"⏱️  Scan interval: {CHECK_INTERVAL} seconds\n"
+        # f"⏱️  Scan interval: {CHECK_INTERVAL} seconds\n"
+        f"{Emoji.replace(':stopwatch:')}  Scan interval: {CHECK_INTERVAL} seconds\n"
         f"📊 Whitelist: {len(WHITELIST_MAC)} devices\n"
         f"🚫 Blacklist: {len(BLACKLIST_MAC)} devices",
         title="Network Monitor",
-        border_style="green"
+        border_style="green",
+        width=shutil.get_terminal_size()[0],
     ))
     
     # Send startup notification
@@ -300,7 +305,7 @@ def monitor_network():
         console.print("\n🛑 [bold red]Monitoring stopped by user[/]")
     finally:
         runtime = datetime.now() - start_time if start_time else None
-        console.print(Panel.fit(
+        console.print(Panel(
             f"[bold green]📊 Monitoring Summary[/]\n"
             f"⏱️  Runtime: {runtime}\n"
             f"🔍 Total scans: {scan_count}\n"
@@ -399,7 +404,8 @@ def detect_current_devices():
         console.print("❌ [bold red]No MAC addresses detected[/]")
         return
     
-    table = Table(title="🖥️ Current Network Devices", box=box.ROUNDED)
+    # table = Table(title="🖥️ Current Network Devices", box=box.ROUNDED)
+    table = Table(title=f"{Emoji.replace(':desktop_computer:')} Current Network Devices", box=box.ROUNDED)
     table.add_column("#", style="dim", width=4)
     table.add_column("MAC Address", style="cyan")
     table.add_column("Status", style="white")
@@ -455,7 +461,7 @@ def version():
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         
-        console.print(Panel.fit(
+        console.print(Panel(
             f"[bold green]MAC Monitor[/]\n"
             f"Version: {mod.version}\n"
             f"Platform: {platform.system()} {platform.release()}",
@@ -488,7 +494,8 @@ def generate_config():
 def usage():
     """Enhanced argument parsing with better help."""
     parser = argparse.ArgumentParser(
-        description="🖥️ MAC Monitor - Network Device Monitoring Utility",
+        # description="🖥️ MAC Monitor - Network Device Monitoring Utility",
+        description=f"{Emoji.replace(':desktop_computer:')} MAC Monitor - Network Device Monitoring Utility",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -544,12 +551,14 @@ Examples:
     elif args.blacklist:
         add_to_list(args.blacklist, 'blacklist')
     else:
-        console.print(Panel.fit(
-            "[bold green]🖥️ MAC Monitor[/]\n"
+        console.print(Panel(
+            # "[bold green]🖥️ MAC Monitor[/]\n"
+            f"[bold green]{Emoji.replace(':desktop_computer:')} MAC Monitor[/]\n"
             "[dim]Use -h or --help for options[/]\n"
             "[dim]Starting network monitoring...[/]",
             title="Welcome",
-            border_style="green"
+            border_style="green",
+            width=shutil.get_terminal_size()[0],
         ))
         monitor_network()
 
