@@ -8,8 +8,12 @@ import socket
 from configset import configset
 from pathlib import Path
 import sys
-from ctraceback import CTraceback
-sys.excepthook = CTraceback()
+try:
+    from ctraceback import CTraceback #activate for developing
+    sys.excepthook = CTraceback()
+    is_ctraceback = True
+except:
+    is_ctraceback = False
 import sendgrowl
 from rich.console import Console
 from rich.panel import Panel
@@ -21,7 +25,7 @@ from rich.emoji import Emoji
 from rich import box
 import threading
 from datetime import datetime
-import shutil
+from licface import CustomRichHelpFormatter
 
 console = Console()
 
@@ -125,11 +129,7 @@ start_time = None
 def get_mac_addresses():
     """Extract MAC addresses from ARP table."""
     try:
-        system = platform.system().lower()
-        if system == "windows":
-            output = subprocess.check_output("arp -a", shell=True, text=True)
-        else:
-            output = subprocess.check_output("arp -a", shell=True, text=True)
+        output = subprocess.check_output("arp -a", shell=True, text=True)
     except subprocess.CalledProcessError as e:
         console.print(f"❌ [bold red]Error running ARP command: {e}[/]")
         return set()
@@ -219,7 +219,7 @@ def monitor_network():
         f"🚫 Blacklist: {len(BLACKLIST_MAC)} devices",
         title="Network Monitor",
         border_style="green",
-        width=shutil.get_terminal_size()[0],
+        width=os.get_terminal_size()[0],
     ))
     
     # Send startup notification
@@ -493,18 +493,20 @@ def generate_config():
 
 def usage():
     """Enhanced argument parsing with better help."""
+    prog = str(Path(__file__).stem)
     parser = argparse.ArgumentParser(
         # description="🖥️ MAC Monitor - Network Device Monitoring Utility",
         description=f"{Emoji.replace(':desktop_computer:')} MAC Monitor - Network Device Monitoring Utility",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        formatter_class=CustomRichHelpFormatter,
+        prog=prog,
+        epilog=f"""
 Examples:
-  %(prog)s                          # Start monitoring
-  %(prog)s -f aa:bb:cc:dd:ee:ff     # Find specific MAC
-  %(prog)s -f 192.168.1.100         # Find specific IP
-  %(prog)s -d                       # Detect current devices
-  %(prog)s -a aa:bb:cc:dd:ee:ff     # Add to whitelist
-  %(prog)s -b aa:bb:cc:dd:ee:ff     # Add to blacklist
+  {prog}                          # Start monitoring
+  {prog} -f aa:bb:cc:dd:ee:ff     # Find specific MAC
+  {prog} -f 192.168.1.100         # Find specific IP
+  {prog} -d                       # Detect current devices
+  {prog} -a aa:bb:cc:dd:ee:ff     # Add to whitelist
+  {prog} -b aa:bb:cc:dd:ee:ff     # Add to blacklist
         """
     )
     
@@ -551,6 +553,7 @@ Examples:
     elif args.blacklist:
         add_to_list(args.blacklist, 'blacklist')
     else:
+        parser.print_help()
         console.print(Panel(
             # "[bold green]🖥️ MAC Monitor[/]\n"
             f"[bold green]{Emoji.replace(':desktop_computer:')} MAC Monitor[/]\n"
@@ -558,7 +561,7 @@ Examples:
             "[dim]Starting network monitoring...[/]",
             title="Welcome",
             border_style="green",
-            width=shutil.get_terminal_size()[0],
+            width=os.get_terminal_size()[0],
         ))
         monitor_network()
 
@@ -571,5 +574,5 @@ if __name__ == "__main__":
         sys.exit(0)
     except Exception as e:
         console.print(f"💥 [bold red]Unexpected error: {e}[/]")
-        CTraceback(*sys.exc_info())
+        if is_ctraceback: CTraceback(*sys.exc_info())
         sys.exit(1)
